@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   LayoutDashboard, 
   Activity, 
@@ -31,7 +31,7 @@ import {
   Plus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { format, subDays, isSameDay, startOfWeek, addDays } from 'date-fns';
+import { format, subDays, isSameDay } from 'date-fns';
 import { 
   LineChart, 
   Line, 
@@ -46,8 +46,10 @@ import {
   Bar,
   Cell
 } from 'recharts';
-import { jsPDF } from 'jspdf';
-import 'jspdf-autotable';
+import { nextTreatment, historyInsights } from './lib/care';
+import { useCareStorage } from './lib/storage';
+import { ProfileEditor } from './ProfileEditor';
+import { validateCare } from './lib/validation';
 import { cn } from './lib/utils';
 import { 
   CatProfile, 
@@ -73,7 +75,7 @@ const Header = ({ profile, onNotify }: { profile: CatProfile, onNotify: () => vo
         <h1 className="text-3xl font-serif text-emerald-900 leading-none italic">Breeze</h1>
       </div>
     </div>
-    <button 
+    <button aria-label="Notifications"
       onClick={onNotify}
       className="w-10 h-10 flex items-center justify-center rounded-full text-emerald-800 hover:bg-emerald-50 transition-colors"
     >
@@ -116,12 +118,14 @@ const Navigation = ({ activeTab, setActiveTab }: { activeTab: string, setActiveT
 
 const RiskCard = ({ data, isLoading, error, onRetry, onChangeLocation, locationName }: { data: EnvironmentalData, isLoading: boolean, error: string | null, onRetry: () => void, onChangeLocation: () => void, locationName: string }) => {
   const riskColors = {
+    Unavailable: "bg-slate-50 text-slate-600 border-slate-100",
     Low: "bg-emerald-50 text-emerald-700 border-emerald-100",
     Medium: "bg-amber-50 text-amber-700 border-amber-100",
     High: "bg-rose-50 text-rose-700 border-rose-100",
   };
 
   const riskDot = {
+    Unavailable: "bg-slate-400",
     Low: "bg-emerald-500",
     Medium: "bg-amber-500",
     High: "bg-rose-500",
@@ -188,7 +192,7 @@ const RiskCard = ({ data, isLoading, error, onRetry, onChangeLocation, locationN
           </div>
           <div className="flex items-center gap-2">
             <span className={cn("w-3 h-3 rounded-full animate-pulse", riskDot[data.riskLevel])}></span>
-            <p className="text-3xl font-bold tracking-tight">{data.riskLevel} Risk</p>
+            <p className="text-3xl font-bold tracking-tight">{data.riskLevel === 'Unavailable' ? 'Data unavailable' : `${data.riskLevel} Risk`}</p>
           </div>
         </div>
         <div className="p-3 bg-white/50 rounded-2xl backdrop-blur-sm">
@@ -196,14 +200,14 @@ const RiskCard = ({ data, isLoading, error, onRetry, onChangeLocation, locationN
         </div>
       </div>
       <p className="text-sm font-medium leading-relaxed mb-6 opacity-90">{data.prediction}</p>
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         <div className="flex items-center gap-2 bg-white/40 px-4 py-2 rounded-full text-xs font-bold backdrop-blur-sm">
           <Activity className="w-3 h-3" />
-          AQI {data.aqi}
+          {data.indexLabel || 'AQI'} {data.aqi ?? 'Unavailable'}
         </div>
         <div className="flex items-center gap-2 bg-white/40 px-4 py-2 rounded-full text-xs font-bold backdrop-blur-sm">
           <Droplets className="w-3 h-3" />
-          {data.humidity}% Hum
+          Humidity {data.humidity === null ? 'unavailable' : `${data.humidity}%`}
         </div>
       </div>
     </div>
@@ -224,7 +228,7 @@ const QuickLogButton = ({ onClick }: { onClick: () => void }) => (
   </button>
 );
 
-const NextMedCard = ({ med }: { med: Medication | undefined }) => (
+const NextMedCard = ({ med, due }: { med: Medication | undefined, due?: Date }) => (
   <div className="bg-emerald-900 text-white p-6 rounded-3xl relative overflow-hidden group">
     <div className="absolute -right-4 -top-4 w-32 h-32 bg-white/5 rounded-full group-hover:scale-110 transition-transform duration-700"></div>
     <div className="relative z-10">
@@ -235,7 +239,7 @@ const NextMedCard = ({ med }: { med: Medication | undefined }) => (
       {med ? (
         <div className="flex justify-between items-end">
           <div>
-            <p className="text-3xl font-bold mb-1">{med.reminders[0]}</p>
+            <p className="text-3xl font-bold mb-1">{due ? format(due, 'MMM d, HH:mm') : 'Not scheduled'}</p>
             <p className="text-emerald-200 font-medium">{med.name}</p>
           </div>
           <div className="bg-emerald-800 p-3 rounded-2xl">
@@ -246,7 +250,7 @@ const NextMedCard = ({ med }: { med: Medication | undefined }) => (
         <div className="flex justify-between items-end">
           <div>
             <p className="text-xl font-bold mb-1">No treatments scheduled</p>
-            <p className="text-emerald-200/60 font-medium text-xs italic">Add medications in the Meds tab</p>
+            <p className="text-emerald-200/60 font-medium text-xs italic">Add reminder times in the Meds tab</p>
           </div>
           <div className="bg-emerald-800 p-3 rounded-2xl">
             <Pill className="w-6 h-6 text-emerald-400/50" />
@@ -257,13 +261,15 @@ const NextMedCard = ({ med }: { med: Medication | undefined }) => (
   </div>
 );
 
-const AddMedicationModal = ({ isOpen, onClose, onSave }: { isOpen: boolean, onClose: () => void, onSave: (med: Partial<Medication>) => void }) => {
-  const [name, setName] = useState('');
-  const [dosage, setDosage] = useState('');
-  const [frequency, setFrequency] = useState('');
-  const [type, setType] = useState<'Oral' | 'Inhaler'>('Oral');
-  const [stock, setStock] = useState(30);
-  const [reminder, setReminder] = useState('08:00');
+const AddMedicationModal = ({ isOpen, onClose, onSave, initial }: { isOpen: boolean, onClose: () => void, onSave: (med: Partial<Medication>) => void, initial?: Medication }) => {
+  const [name, setName] = useState(initial?.name ?? '');
+  const [dosage, setDosage] = useState(initial?.dosage ?? '');
+  const [frequency, setFrequency] = useState(initial?.frequency ?? '');
+  const [type, setType] = useState<'Oral' | 'Inhaler'>(initial?.type ?? 'Oral');
+  const [stock, setStock] = useState(initial?.stock ?? 30);
+  const [reminder, setReminder] = useState(initial?.reminders.join(', ') ?? '08:00');
+  const times = reminder.split(',').map(t => t.trim()).filter(Boolean);
+  const valid = name.trim() && dosage.trim() && Number.isInteger(stock) && stock >= 0 && times.every(t => /^([01]\d|2[0-3]):[0-5]\d$/.test(t));
 
   if (!isOpen) return null;
 
@@ -272,7 +278,7 @@ const AddMedicationModal = ({ isOpen, onClose, onSave }: { isOpen: boolean, onCl
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" />
       <motion.div initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }} className="relative w-full max-w-lg bg-white rounded-t-[3rem] sm:rounded-[3rem] p-8 max-h-[90vh] overflow-y-auto shadow-2xl">
         <div className="flex justify-between items-center mb-8">
-          <h2 className="text-2xl font-bold text-slate-900">Add Medication</h2>
+          <h2 className="text-2xl font-bold text-slate-900">{initial ? 'Edit Medication' : 'Add Medication'}</h2>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
             <X className="w-6 h-6 text-slate-400" />
           </button>
@@ -310,15 +316,16 @@ const AddMedicationModal = ({ isOpen, onClose, onSave }: { isOpen: boolean, onCl
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2 block">Current Stock</label>
-              <input type="number" value={stock} onChange={(e) => setStock(parseInt(e.target.value))} className="w-full bg-slate-50 border-none rounded-2xl p-4 text-sm focus:ring-2 focus:ring-emerald-500/20" />
+              <input aria-label="Current Stock" min="0" step="1" type="number" value={Number.isFinite(stock) ? stock : ''} onChange={(e) => setStock(e.target.value === '' ? NaN : Number(e.target.value))} className="w-full bg-slate-50 border-none rounded-2xl p-4 text-sm focus:ring-2 focus:ring-emerald-500/20" />
             </div>
             <div>
               <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2 block">Reminder Time</label>
-              <input type="time" value={reminder} onChange={(e) => setReminder(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl p-4 text-sm focus:ring-2 focus:ring-emerald-500/20" />
+              <input aria-label="Reminder times" type="text" placeholder="08:00, 20:00 (blank for as needed)" value={reminder} onChange={(e) => setReminder(e.target.value)} className="w-full bg-slate-50 border-none rounded-2xl p-4 text-sm focus:ring-2 focus:ring-emerald-500/20" />
             </div>
           </div>
 
-          <button onClick={() => { onSave({ name, dosage, frequency, type, stock, totalStock: stock, reminders: [reminder] }); onClose(); }} className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-100 active:scale-95 transition-all">Save Medication</button>
+          <p className="text-xs text-slate-500">Use 24-hour times separated by commas. Blank means as needed. Stock counts doses remaining.</p>
+          <button disabled={!valid} onClick={() => { if (!valid) return; onSave({ name: name.trim(), dosage: dosage.trim(), frequency, type, stock, totalStock: Math.max(stock, initial?.totalStock ?? stock), reminders: [...new Set(times)] }); onClose(); }} className="w-full bg-emerald-600 text-white py-5 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-100 active:scale-95 transition-all">Save Medication</button>
         </div>
       </motion.div>
     </div>
@@ -454,20 +461,23 @@ const LogAttackModal = ({ isOpen, onClose, onSave }: { isOpen: boolean, onClose:
 const LocationSearchModal = ({ isOpen, onClose, onSelect }: { isOpen: boolean, onClose: () => void, onSelect: (name: string, lat: number, lng: number) => void }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
+  const searchId = useRef(0);
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleSearch = async () => {
     if (!query.trim()) return;
-    setIsSearching(true);
+    const id = ++searchId.current;
+    setResults([]); setIsSearching(true);
     setError(null);
     try {
-      const response = await fetch(`/api/geocode?address=${encodeURIComponent(query)}`);
+      const response = await fetch(`/api/geocode?address=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(15000) });
       const data = await response.json();
-      if (data.status === 'OK') {
+      if (id !== searchId.current) return;
+      if (response.ok && data.status === 'OK') {
         setResults(data.results);
       } else {
-        setError(data.error_message || "No results found. Please try a different location.");
+        setError(data.error || data.error_message || "No results found. Please try a different location.");
       }
     } catch (err) {
       setError("Failed to search location. Please check your connection.");
@@ -552,207 +562,134 @@ const LocationSearchModal = ({ isOpen, onClose, onSelect }: { isOpen: boolean, o
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [profile, setProfile] = useState<CatProfile>(INITIAL_CAT_PROFILE);
-  const [meds, setMeds] = useState<Medication[]>(INITIAL_MEDICATIONS);
-  const [history, setHistory] = useState<SymptomLog[]>(MOCK_SYMPTOM_HISTORY);
+  const [care, setCare, storageError, restoreCare] = useCareStorage('breeze_care_v1', { profile: INITIAL_CAT_PROFILE, meds: INITIAL_MEDICATIONS, history: MOCK_SYMPTOM_HISTORY, treatments: [] as TreatmentHistory[] }, validateCare);
+  const { profile, meds, history, treatments } = care;
+  const setProfile = (profile: CatProfile) => setCare(c => ({ ...c, profile }));
+  const [editingMed, setEditingMed] = useState<Medication | undefined>();
+  const [clock, setClock] = useState(new Date());
+  const requestId = useRef(0);
+  const next = nextTreatment(meds, treatments, clock);
+  const insights = historyInsights(history, clock);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const notified = useRef(new Set<string>());
+  useEffect(() => { const timer = setInterval(() => setClock(new Date()), 15000); return () => clearInterval(timer); }, []);
+  useEffect(() => {
+    if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+    meds.forEach(med => med.reminders.forEach(time => {
+      const due = new Date(clock); const [h, m] = time.split(':').map(Number); due.setHours(h, m, 0, 0);
+      const key = `${med.id}:${due.toISOString()}`;
+      if (+clock >= +due && +clock - +due < 60000 && !notified.current.has(key) && !treatments.some(t => t.medicationId === med.id && t.scheduledFor === due.toISOString())) {
+        notified.current.add(key); new Notification(`Treatment reminder: ${med.name}`, { body: `${med.dosage} for ${profile.name || 'your cat'}` });
+      }
+    }));
+  }, [clock, notificationsEnabled, meds, treatments, profile.name]);
+  const recordDose = (med: Medication, status: 'Taken' | 'Missed') => {
+    if (status === 'Taken' && med.stock < 1) return;
+    if (med.reminders.length && nextTreatment([med], treatments, new Date())?.date > new Date(new Date().setHours(23, 59, 59, 999))) return;
+    const slot = nextTreatment([med], treatments, new Date());
+    const scheduledFor = slot && isSameDay(slot.date, new Date()) ? slot.date.toISOString() : undefined;
+    setCare(c => {
+      if (scheduledFor && c.treatments.some(t => t.medicationId === med.id && t.scheduledFor === scheduledFor)) return c;
+      const current = c.meds.find(m => m.id === med.id);
+      if (!current || (status === 'Taken' && current.stock < 1)) return c;
+      return { ...c, meds: c.meds.map(m => m.id === med.id && status === 'Taken' ? { ...m, stock: m.stock - 1 } : m), treatments: [{ id: crypto.randomUUID(), medicationId: med.id, medicationName: med.name, timestamp: new Date(), status, scheduledFor }, ...c.treatments] };
+    });
+  };
   const [envData, setEnvData] = useState<EnvironmentalData>(MOCK_ENVIRONMENTAL_DATA);
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const [isAddMedModalOpen, setIsAddMedModalOpen] = useState(false);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
-  const [isComingSoonOpen, setIsComingSoonOpen] = useState(false);
+  
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [selectedLog, setSelectedLog] = useState<SymptomLog | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [savedLocation, setSavedLocation] = useState<{ name: string, lat: number, lng: number } | null>(() => {
-    const saved = localStorage.getItem('breeze_location');
-    return saved ? JSON.parse(saved) : null;
+    try { const saved = JSON.parse(localStorage.getItem('breeze_location') || 'null'); return saved && typeof saved.name === 'string' && Number.isFinite(saved.lat) && Number.isFinite(saved.lng) ? saved : null; } catch { return null; }
   });
 
   const fetchEnvData = async (lat?: number, lng?: number) => {
-    setIsLoading(true);
-    setLocationError(null);
-
-    const performFetch = async (latitude: number, longitude: number) => {
-      try {
-        // Check if location is in Singapore
-        const isSingapore = latitude >= 1.13 && latitude <= 1.48 && longitude >= 103.59 && longitude <= 104.04;
-
-        if (isSingapore) {
-          const response = await fetch('/api/singapore-env');
-          const data = await response.json();
-
-          if (data.error) throw new Error(data.error);
-
-          // Find nearest region in Singapore
-          const regions = data.psi.region_metadata;
-          let nearestRegion = 'national';
-          let minDistance = Infinity;
-
-          regions.forEach((r: any) => {
-            const dist = Math.sqrt(Math.pow(r.label_location.latitude - latitude, 2) + Math.pow(r.label_location.longitude - longitude, 2));
-            if (dist < minDistance) {
-              minDistance = dist;
-              nearestRegion = r.name;
-            }
-          });
-
-          const psiReadings = data.psi.items[0].readings;
-          const pm25Readings = data.pm25.items[0].readings;
-
-          const currentAqi = psiReadings.psi_twenty_four_hourly[nearestRegion];
-          const currentPm25 = pm25Readings.pm25_one_hourly[nearestRegion];
-
-          setEnvData({
-            aqi: currentAqi,
-            humidity: 75, // Default for tropical Singapore if not available
-            pollen: {
-              tree: 'Low',
-              grass: 'Low',
-              weed: 'Low',
-            },
-            riskLevel: currentAqi > 100 ? 'High' : (currentAqi > 50 ? 'Medium' : 'Low'),
-            prediction: `Using Singapore NEA data for ${nearestRegion} region. PM2.5: ${currentPm25}µg/m³. Pollen data is limited in tropical regions.`,
-          });
-          return;
-        }
-
-        // 1. Fetch Air Quality via Proxy
-        const aqiResponse = await fetch('/api/air-quality', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            location: { latitude, longitude },
-            extraComputations: ["HEALTH_RECOMMENDATIONS", "DOMINANT_POLLUTANT_CONCENTRATION", "POLLUTANT_ADDITIONAL_INFO"]
-          })
-        });
-        const aqiData = await aqiResponse.json();
-
-        if (aqiData.error) {
-          // Google API errors are usually in data.error.message
-          throw new Error(aqiData.error.message || "Air Quality API Error");
-        }
-
-        // 2. Fetch Pollen via Proxy
-        let pollenInfo: any[] = [];
-        try {
-          const pollenResponse = await fetch(`/api/pollen?latitude=${latitude}&longitude=${longitude}&days=1`);
-          const pollenData = await pollenResponse.json();
-
-          if (pollenData.error) {
-            console.warn("Pollen API not available for this location:", pollenData.error.message);
-          } else {
-            pollenInfo = pollenData.dailyInfo?.[0]?.pollenTypeInfo || [];
-          }
-        } catch (err) {
-          console.error("Pollen fetch failed", err);
-        }
-
-        // 3. Map Data
-        const currentAqi = aqiData.indexes?.[0]?.aqi || 42;
-        const currentHum = aqiData.pollutants?.find((p: any) => p.code === 'h')?.concentration?.value || 35;
-        
-        const treePollen = pollenInfo.find((p: any) => p.pollenType === 'TREE')?.indexInfo?.category || 'Low';
-        const grassPollen = pollenInfo.find((p: any) => p.pollenType === 'GRASS')?.indexInfo?.category || 'Low';
-        const weedPollen = pollenInfo.find((p: any) => p.pollenType === 'WEED')?.indexInfo?.category || 'Low';
-
-        const riskLevel = currentAqi > 100 || treePollen === 'High' ? 'High' : (currentAqi > 50 || treePollen === 'Moderate' ? 'Medium' : 'Low');
-
-        setEnvData({
-          aqi: currentAqi,
-          humidity: currentHum,
-          pollen: {
-            tree: treePollen as any,
-            grass: grassPollen as any,
-            weed: weedPollen as any,
-          },
-          riskLevel: riskLevel as any,
-          prediction: `Data synced for your location. ${treePollen === 'High' ? 'High tree pollen detected—take precautions.' : 'Conditions are stable.'}`,
-        });
-      } catch (error: any) {
-        console.error("Failed to fetch environmental data", error);
-        setLocationError(error.message || "Information is unavailable for this location, please try a different location.");
-      } finally {
-        setIsLoading(false);
+    const id = ++requestId.current;
+    setIsLoading(true); setLocationError(null); setEnvData(MOCK_ENVIRONMENTAL_DATA);
+    try {
+      let latitude = lat ?? savedLocation?.lat, longitude = lng ?? savedLocation?.lng;
+      if (latitude === undefined || longitude === undefined) {
+        if (!navigator.geolocation) throw new Error('Location is unavailable. Please choose a location.');
+        const position = await new Promise<GeolocationPosition>((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000, maximumAge: 300000 }));
+        latitude = position.coords.latitude; longitude = position.coords.longitude;
       }
-    };
-
-    if (lat !== undefined && lng !== undefined) {
-      await performFetch(lat, lng);
-    } else if (savedLocation) {
-      await performFetch(savedLocation.lat, savedLocation.lng);
-    } else {
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          await performFetch(position.coords.latitude, position.coords.longitude);
-        },
-        (error) => {
-          console.error("Geolocation failed", error);
-          setLocationError("Location access denied. Please enter coordinates manually or allow location access.");
-          setIsLoading(false);
-        }
-      );
-    }
+      const response = await fetch(`/api/environment?latitude=${latitude}&longitude=${longitude}`, { signal: AbortSignal.timeout(20000) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Environmental data is unavailable.');
+      if (id === requestId.current) setEnvData(data);
+    } catch (error: any) {
+      if (id === requestId.current) setLocationError(error.code === 1 ? 'Location access denied. Choose a location manually.' : error.message || 'Environmental data is unavailable.');
+    } finally { if (id === requestId.current) setIsLoading(false); }
   };
 
   const handleSelectLocation = (name: string, lat: number, lng: number) => {
     const loc = { name, lat, lng };
     setSavedLocation(loc);
-    localStorage.setItem('breeze_location', JSON.stringify(loc));
+    try { localStorage.setItem('breeze_location', JSON.stringify(loc)); } catch { alert('Location could not be saved on this device.'); }
     setIsLocationModalOpen(false);
-    fetchEnvData(lat, lng);
+
   };
 
   useEffect(() => {
     fetchEnvData();
-  }, []);
+    const interval = setInterval(() => fetchEnvData(), 15 * 60 * 1000);
+    return () => { clearInterval(interval); requestId.current++; };
+  }, [savedLocation]);
 
   const handleSaveLog = (newLog: Partial<SymptomLog>) => {
     const log: SymptomLog = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: crypto.randomUUID(),
       timestamp: newLog.timestamp || new Date(),
       severity: newLog.severity || 'Moderate',
       duration: newLog.duration || '1-5 mins',
       triggers: newLog.triggers || [],
       notes: newLog.notes || '',
-      aqi: envData.aqi,
-      humidity: envData.humidity,
-      pollen: envData.pollen.tree,
+      aqi: locationError || isLoading ? undefined : envData.aqi ?? undefined,
+      humidity: locationError || isLoading ? undefined : envData.humidity ?? undefined,
+      pollen: locationError || isLoading || envData.pollen.tree === 'Unavailable' ? undefined : envData.pollen.tree,
     };
-    setHistory([log, ...history]);
+    setCare(c => ({ ...c, history: [log, ...c.history] }));
   };
 
   const handleDeleteLog = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setHistory(history.filter(log => log.id !== id));
+    if (confirm('Delete this symptom log?')) setCare(c => ({ ...c, history: c.history.filter(log => log.id !== id) }));
   };
 
   const handleAddMed = (newMed: Partial<Medication>) => {
     const med: Medication = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: crypto.randomUUID(),
       name: newMed.name || 'Unnamed Med',
       dosage: newMed.dosage || '1 unit',
       frequency: newMed.frequency || 'Daily',
-      stock: newMed.stock || 30,
-      totalStock: newMed.totalStock || 30,
+      stock: newMed.stock ?? 30,
+      totalStock: newMed.totalStock ?? 30,
       type: newMed.type || 'Oral',
       reminders: newMed.reminders || ['08:00'],
     };
-    setMeds([...meds, med]);
+    setCare(c => ({ ...c, meds: editingMed ? c.meds.map(m => m.id === editingMed.id ? { ...med, id: m.id } : m) : [...c.meds, med] }));
+    setEditingMed(undefined);
   };
 
-  const generatePDF = () => {
+  const generatePDF = async () => {
+    try {
+    const [{ jsPDF }, { default: autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
     const doc = new jsPDF();
     doc.setFontSize(20);
-    doc.text(`Asthma Care Report: ${profile.name}`, 20, 20);
+    doc.text(`Asthma Care Report: ${profile.name || 'My cat'}`, 20, 20);
     doc.setFontSize(12);
     doc.text(`Generated on: ${format(new Date(), 'PPP')}`, 20, 30);
     
-    (doc as any).autoTable({
+    autoTable(doc, {
       startY: 40,
       head: [['Date', 'Severity', 'Duration', 'Triggers', 'Notes']],
       body: history.map(log => [
-        format(log.timestamp, 'MMM d, h:mm a'),
+        format(log.timestamp, 'yyyy-MM-dd, HH:mm'),
         log.severity,
         log.duration,
         log.triggers.join(', '),
@@ -760,7 +697,8 @@ export default function App() {
       ]),
     });
     
-    doc.save(`${profile.name}_Asthma_Report.pdf`);
+    doc.save(`${profile.name || 'My_cat'}_Asthma_Report.pdf`);
+    } catch { alert('The PDF could not be generated. Please try again or download a data backup.'); }
   };
 
   const renderContent = () => {
@@ -785,7 +723,7 @@ export default function App() {
             </section>
 
             <section>
-              <NextMedCard med={meds[0]} />
+              <NextMedCard med={next?.med} due={next?.date} />
             </section>
           </motion.div>
         );
@@ -879,7 +817,7 @@ export default function App() {
                 <p className="text-slate-500 mt-1">Keep treatments consistent.</p>
               </div>
               <button 
-                onClick={() => setIsAddMedModalOpen(true)}
+                aria-label="Add medication" onClick={() => { setEditingMed(undefined); setIsAddMedModalOpen(true); }}
                 className="bg-emerald-100 text-emerald-700 p-3 rounded-2xl"
               >
                 <PlusCircle className="w-6 h-6" />
@@ -888,17 +826,17 @@ export default function App() {
 
             <div className="bg-emerald-50 p-6 rounded-[2.5rem]">
               <div className="flex justify-between items-center mb-6">
-                <h3 className="font-bold text-emerald-900">Weekly Progress</h3>
+                <h3 className="font-bold text-emerald-900">Doses recorded · last 7 days</h3>
                 <Calendar className="w-5 h-5 text-emerald-600" />
               </div>
               <div className="flex justify-between">
-                {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, i) => (
+                {Array.from({ length: 7 }, (_, i) => subDays(clock, 6 - i)).map((day, i) => (
                   <div key={i} className="flex flex-col items-center gap-2">
-                    <span className="text-[10px] font-bold text-emerald-600/50">{day}</span>
+                    <span className="text-[10px] font-bold text-emerald-600/50">{format(day, 'EEE')}</span>
                     <div className={cn(
                       "w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold bg-white text-emerald-300"
                     )}>
-                      {i + 16}
+                      {treatments.filter(t => t.status === 'Taken' && isSameDay(t.timestamp, day)).length}
                     </div>
                   </div>
                 ))}
@@ -906,6 +844,7 @@ export default function App() {
             </div>
 
             <div className="space-y-4">
+              {treatments.slice(0, 10).map(t => <div key={t.id} className="text-sm flex justify-between gap-2 bg-white p-3 rounded-xl"><span>{t.medicationName || 'Medication'} · {t.status} · {format(t.timestamp, 'MMM d HH:mm')}</span><button onClick={() => { if (confirm('Undo this dose record?')) setCare(c => ({ ...c, treatments: c.treatments.filter(x => x.id !== t.id), meds: c.meds.map(m => m.id === t.medicationId && t.status === 'Taken' ? { ...m, stock: m.stock + 1, totalStock: Math.max(m.totalStock, m.stock + 1) } : m) })); }}>Undo</button></div>)}
               {meds.length === 0 ? (
                 <div className="bg-white p-12 rounded-[3rem] border border-dashed border-slate-200 flex flex-col items-center justify-center text-center">
                   <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mb-4">
@@ -927,7 +866,7 @@ export default function App() {
                       <div className="flex-1">
                         <div className="flex justify-between items-start">
                           <h4 className="font-bold text-slate-900">{med.name}</h4>
-                          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full uppercase tracking-wider">Next: {med.reminders[0]}</span>
+                          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full uppercase tracking-wider">{nextTreatment([med], treatments, clock) ? `Next: ${format(nextTreatment([med], treatments, clock)!.date, 'MMM d HH:mm')}` : 'As needed'}</span>
                         </div>
                         <p className="text-xs text-slate-400 font-medium mt-0.5">{med.dosage} • {med.frequency}</p>
                         
@@ -939,9 +878,15 @@ export default function App() {
                           <div className="w-32 h-1.5 bg-slate-100 rounded-full overflow-hidden">
                             <div 
                               className="h-full bg-emerald-500 rounded-full" 
-                              style={{ width: `${(med.stock / med.totalStock) * 100}%` }}
+                              style={{ width: `${(med.totalStock ? Math.min(100, med.stock / med.totalStock * 100) : 0)}%` }}
                             ></div>
                           </div>
+                        </div>
+                        <div className="mt-4 flex flex-wrap gap-3 text-sm">
+                          <button className="rounded-xl bg-emerald-100 p-3 disabled:opacity-40" disabled={med.stock < 1 || (!!med.reminders.length && !isSameDay(nextTreatment([med], treatments, clock)!.date, clock))} onClick={() => recordDose(med, 'Taken')}>Record dose</button>
+                          <button className="rounded-xl bg-slate-100 p-3 disabled:opacity-40" disabled={!!med.reminders.length && !isSameDay(nextTreatment([med], treatments, clock)!.date, clock)} onClick={() => recordDose(med, 'Missed')}>Record missed</button>
+                          <button onClick={() => { setEditingMed(med); setIsAddMedModalOpen(true); }}>Edit / refill</button>
+                          <button className="text-rose-600" onClick={() => { if (confirm(`Delete ${med.name}? Dose history will be kept.`)) setCare(c => ({ ...c, meds: c.meds.filter(m => m.id !== med.id) })); }}>Delete</button>
                         </div>
                       </div>
                     </div>
@@ -966,15 +911,7 @@ export default function App() {
           );
         }
 
-        const chartData = [
-          { name: 'Mon', symptoms: 1, humidity: 45 },
-          { name: 'Tue', symptoms: 0, humidity: 50 },
-          { name: 'Wed', symptoms: 2, humidity: 35 },
-          { name: 'Thu', symptoms: 0, humidity: 42 },
-          { name: 'Fri', symptoms: 1, humidity: 38 },
-          { name: 'Sat', symptoms: 3, humidity: 30 },
-          { name: 'Sun', symptoms: 1, humidity: 40 },
-        ];
+        const chartData = insights.days;
 
         return (
           <motion.div 
@@ -982,127 +919,12 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             className="space-y-8 pb-12"
           >
-            {/* Today's Levels */}
-            <section className="space-y-6">
-              <div className="flex justify-between items-end">
-                <div>
-                  <h2 className="text-3xl font-bold text-slate-900">Today's Environment</h2>
-                  <p className="text-slate-500 mt-1">Real-time triggers in your area.</p>
-                </div>
-                <button 
-                  onClick={() => setIsLocationModalOpen(true)}
-                  className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-100 rounded-2xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors"
-                >
-                  <MapPin className="w-4 h-4" />
-                  {savedLocation?.name || "Change Location"}
-                </button>
-              </div>
-
-              <div className="bg-primary-container p-8 rounded-[2.5rem] relative overflow-hidden">
-                <div className="relative z-10">
-                  <span className="inline-block px-4 py-1 bg-white/40 rounded-full text-on-primary-container text-[10px] font-bold uppercase tracking-widest mb-4">Atmospheric Status</span>
-                  <h3 className="text-5xl font-extrabold text-on-primary-container tracking-tighter mb-2">{envData.riskLevel} Risk</h3>
-                  <div className="flex items-center gap-2 text-on-primary-container/80">
-                    <AlertTriangle className="w-4 h-4" />
-                    <p className="text-sm font-medium">
-                      {envData.aqi > 100 ? 'High AQI detected' : 
-                       envData.pollen.tree === 'High' ? 'High Tree Pollen detected' :
-                       envData.pollen.grass === 'High' ? 'High Grass Pollen detected' :
-                       'Conditions are stable'}
-                    </p>
-                  </div>
-                </div>
-                <div className="absolute right-[-20px] bottom-[-20px] w-48 h-48 opacity-10 rotate-12">
-                  <Wind className="w-full h-full" />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-6">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h4 className="font-bold text-slate-900">Air Quality (AQI)</h4>
-                      <p className="text-xs text-slate-400">Atmosphere clarity</p>
-                    </div>
-                    <div className="bg-secondary-container px-4 py-1 rounded-full">
-                      <span className="text-xl font-black text-on-secondary-container">{envData.aqi}</span>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-emerald-500 rounded-full transition-all duration-1000" style={{ width: `${Math.min(100, (envData.aqi / 200) * 100)}%` }}></div>
-                    </div>
-                    <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                      <span>Good</span>
-                      <span>Moderate</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-tertiary-container/30 p-6 rounded-3xl flex flex-col justify-between">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="p-2 bg-white/50 rounded-xl">
-                      <Droplets className="w-5 h-5 text-tertiary" />
-                    </div>
-                    <h4 className="font-bold text-on-tertiary-container">Humidity</h4>
-                  </div>
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-4xl font-black text-on-tertiary-container">{envData.humidity}</span>
-                    <span className="text-xl font-bold text-on-tertiary-container">%</span>
-                  </div>
-                  <div className="mt-4 p-3 bg-white/40 rounded-xl backdrop-blur-sm">
-                    <p className="text-[10px] font-bold text-on-tertiary-container flex items-center gap-2">
-                      <Info className="w-3 h-3" />
-                      {envData.humidity < 30 ? 'Low: May trigger coughing' : 
-                       envData.humidity > 60 ? 'High: May increase mold risk' : 
-                       'Optimal humidity levels'}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
-                <h4 className="font-bold text-slate-900 mb-6">Pollen Breakdown</h4>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="w-12 h-12 bg-rose-50 rounded-2xl flex items-center justify-center text-rose-500">
-                      <Leaf className="w-6 h-6" />
-                    </div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Tree</p>
-                    <span className={cn(
-                      "px-2 py-0.5 text-[10px] font-black uppercase rounded-full",
-                      envData.pollen.tree === 'High' ? "bg-rose-100 text-rose-700" :
-                      envData.pollen.tree === 'Moderate' ? "bg-amber-100 text-amber-700" :
-                      "bg-emerald-100 text-emerald-700"
-                    )}>{envData.pollen.tree}</span>
-                  </div>
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="w-12 h-12 bg-amber-50 rounded-2xl flex items-center justify-center text-amber-500">
-                      <Sparkles className="w-6 h-6" />
-                    </div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Grass</p>
-                    <span className={cn(
-                      "px-2 py-0.5 text-[10px] font-black uppercase rounded-full",
-                      envData.pollen.grass === 'High' ? "bg-rose-100 text-rose-700" :
-                      envData.pollen.grass === 'Moderate' ? "bg-amber-100 text-amber-700" :
-                      "bg-emerald-100 text-emerald-700"
-                    )}>{envData.pollen.grass}</span>
-                  </div>
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-500">
-                      <Wind className="w-6 h-6" />
-                    </div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Weed</p>
-                    <span className={cn(
-                      "px-2 py-0.5 text-[10px] font-black uppercase rounded-full",
-                      envData.pollen.weed === 'High' ? "bg-rose-100 text-rose-700" :
-                      envData.pollen.weed === 'Moderate' ? "bg-amber-100 text-amber-700" :
-                      "bg-emerald-100 text-emerald-700"
-                    )}>{envData.pollen.weed}</span>
-                  </div>
-                </div>
-              </div>
-            </section>
+            <RiskCard data={envData} isLoading={isLoading} error={locationError} onRetry={() => fetchEnvData()} onChangeLocation={() => setIsLocationModalOpen(true)} locationName={savedLocation?.name || 'Current Location'} />
+            {!locationError && <div className="bg-white p-6 rounded-3xl text-sm space-y-2">
+              <p>Pollen · Tree: {envData.pollen.tree} · Grass: {envData.pollen.grass} · Weed: {envData.pollen.weed}</p>
+              <p>Observed: {envData.observedAt ? format(new Date(envData.observedAt), 'MMM d, HH:mm') : 'Unavailable'}</p>
+              <button onClick={() => fetchEnvData()} className="text-emerald-700 font-bold">Refresh readings</button>
+            </div>}
 
             {/* Historical Insights */}
             <section className="space-y-6">
@@ -1126,7 +948,7 @@ export default function App() {
                     <div className="flex justify-between items-center mb-8">
                       <div>
                         <h4 className="font-bold text-slate-900">Last 7 Days Pattern</h4>
-                        <p className="text-xs text-slate-400">Symptoms vs. Humidity</p>
+                        <p className="text-xs text-slate-400">Symptoms vs. humidity captured with logs</p>
                       </div>
                       <div className="flex gap-4">
                         <div className="flex items-center gap-1.5">
@@ -1153,8 +975,9 @@ export default function App() {
                           <Tooltip 
                             contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                           />
-                          <Area type="monotone" dataKey="symptoms" stroke="#ef4444" fillOpacity={1} fill="url(#colorSymp)" strokeWidth={3} />
-                          <Line type="monotone" dataKey="humidity" stroke="#0ea5e9" strokeWidth={2} dot={false} strokeDasharray="5 5" />
+                          <YAxis yAxisId="symptoms" allowDecimals={false} /><YAxis yAxisId="humidity" orientation="right" domain={[0, 100]} unit="%" />
+                          <Area yAxisId="symptoms" type="monotone" dataKey="symptoms" stroke="#ef4444" fillOpacity={1} fill="url(#colorSymp)" strokeWidth={3} />
+                          <Line yAxisId="humidity" connectNulls={false} type="monotone" dataKey="humidity" stroke="#0ea5e9" strokeWidth={2} dot={false} strokeDasharray="5 5" />
                         </AreaChart>
                       </ResponsiveContainer>
                     </div>
@@ -1170,13 +993,7 @@ export default function App() {
                     </div>
                     <div className="h-64 w-full">
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={[
-                          { name: 'Pollen', value: history.filter(l => l.triggers.includes('Pollen')).length },
-                          { name: 'Dust', value: history.filter(l => l.triggers.includes('Dust')).length },
-                          { name: 'Cold', value: history.filter(l => l.triggers.includes('Cold Air')).length },
-                          { name: 'Exercise', value: history.filter(l => l.triggers.includes('Exercise')).length },
-                          { name: 'Stress', value: history.filter(l => l.triggers.includes('Stress')).length },
-                        ]}>
+                        <BarChart data={insights.counts}>
                           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                           <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fontWeight: 700, fill: '#94a3b8'}} />
                           <Tooltip 
@@ -1201,7 +1018,7 @@ export default function App() {
                       <div className="flex items-start gap-4">
                         <Info className="w-6 h-6 text-emerald-500 shrink-0" />
                         <p className="text-sm text-emerald-700 font-medium leading-relaxed">
-                          <span className="font-bold">30-Day Insight:</span> {history.length > 0 ? 'Pollen remains the primary trigger, responsible for 40% of all attacks this month.' : 'Historical patterns will appear here as you log symptoms.'}
+                          <span className="font-bold">30-Day Insight:</span> {insights.summary}
                         </p>
                       </div>
                     </div>
@@ -1234,6 +1051,15 @@ export default function App() {
               </div>
             </div>
 
+            <ProfileEditor key={JSON.stringify(profile)} profile={profile} onSave={setProfile} />
+            <label className="block bg-white p-4 rounded-xl text-sm">Restore a backup
+              <input type="file" accept="application/json,.json" className="block mt-2" onChange={async e => {
+                const file = e.target.files?.[0]; if (!file) return;
+                try { const restored = validateCare(JSON.parse(await file.text())); if (confirm('Replace the current care records with this backup?')) restoreCare(restored); }
+                catch { alert('This backup is not a valid Breeze care record. Nothing was changed.'); }
+                e.target.value = '';
+              }} />
+            </label>
             <div className="grid grid-cols-1 gap-4">
               <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-4">
                 <div className="flex items-center gap-3 text-emerald-600">
@@ -1274,11 +1100,14 @@ export default function App() {
               </div>
 
               <button 
-                onClick={() => setIsComingSoonOpen(true)}
+                onClick={() => {
+                  const blob = new Blob([JSON.stringify(care, null, 2)], { type: 'application/json' });
+                  const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'breeze-backup.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+                }}
                 className="w-full bg-slate-900 text-white py-5 rounded-3xl font-bold flex items-center justify-center gap-3 shadow-xl shadow-slate-200 active:scale-95 transition-all"
               >
                 <SettingsIcon className="w-5 h-5" />
-                App Settings
+                Download data backup
               </button>
             </div>
           </motion.div>
@@ -1294,6 +1123,8 @@ export default function App() {
       <Header profile={profile} onNotify={() => setIsNotificationOpen(true)} />
       
       <main className="max-w-xl mx-auto px-6 pt-8">
+        {storageError && <p role="alert" className="p-4 mb-4 bg-rose-50 text-rose-700 rounded-xl">{storageError}</p>}
+        <p className="text-xs text-slate-500 mb-4">Care records are saved on this browser. Download a backup in Profile.</p>
         <AnimatePresence mode="wait">
           {renderContent()}
         </AnimatePresence>
@@ -1312,8 +1143,9 @@ export default function App() {
 
         {isAddMedModalOpen && (
           <AddMedicationModal 
-            isOpen={isAddMedModalOpen} 
-            onClose={() => setIsAddMedModalOpen(false)} 
+            key={editingMed?.id || 'new'} initial={editingMed}
+            isOpen={isAddMedModalOpen}
+            onClose={() => { setIsAddMedModalOpen(false); setEditingMed(undefined); }} 
             onSave={handleAddMed}
           />
         )}
@@ -1334,22 +1166,14 @@ export default function App() {
                 <Bell className="w-8 h-8 text-emerald-500" />
               </div>
               <h3 className="text-xl font-bold text-slate-900 mb-2">Notifications</h3>
-              <p className="text-slate-500 text-sm mb-8">You're all caught up! No new alerts for {profile.name}.</p>
+              <p className="text-slate-500 text-sm mb-4">{next ? `Next treatment: ${next.med.name}, ${format(next.date, 'MMM d HH:mm')}` : 'No treatments scheduled.'}</p>
+              <p className="text-xs text-slate-500 mb-4">Reminders work while this page is open. Your device may pause background tabs. Use a phone alarm for dependable reminders.</p>
+              <button className="text-emerald-700 font-bold mb-4" onClick={async () => {
+                if (!('Notification' in window)) { alert('Browser notifications are unavailable.'); return; }
+                const permission = await Notification.requestPermission(); setNotificationsEnabled(permission === 'granted');
+                if (permission !== 'granted') alert('Notifications were not enabled. Check your browser settings.');
+              }}>{notificationsEnabled ? 'Reminders enabled for this session' : 'Enable reminders'}</button>
               <button onClick={() => setIsNotificationOpen(false)} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold">Close</button>
-            </motion.div>
-          </div>
-        )}
-
-        {isComingSoonOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsComingSoonOpen(false)} className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" />
-            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="relative w-full max-w-sm bg-white rounded-[2.5rem] p-8 text-center shadow-2xl">
-              <div className="w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-6">
-                <Sparkles className="w-8 h-8 text-amber-500" />
-              </div>
-              <h3 className="text-xl font-bold text-slate-900 mb-2">Coming Soon</h3>
-              <p className="text-slate-500 text-sm mb-8">We're working hard to bring you more advanced settings and features!</p>
-              <button onClick={() => setIsComingSoonOpen(false)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold">Got it</button>
             </motion.div>
           </div>
         )}
@@ -1412,3 +1236,4 @@ export default function App() {
     </div>
   );
 }
+
