@@ -16,15 +16,16 @@ export const INITIAL_CAT_PROFILE: CatProfile = {
 export const INITIAL_MEDICATIONS: Medication[] = [];
 
 export const MOCK_ENVIRONMENTAL_DATA: EnvironmentalData = {
-  aqi: 0,
-  humidity: 0,
+  aqi: null,
+  humidity: null,
   pollen: {
-    tree: 'Low',
-    grass: 'Low',
-    weed: 'Low',
+    tree: 'Unavailable',
+    grass: 'Unavailable',
+    weed: 'Unavailable',
   },
-  riskLevel: 'Low',
+  riskLevel: 'Unavailable',
   prediction: 'Fetching real-time environmental data...',
 };
 
 export const MOCK_SYMPTOM_HISTORY: SymptomLog[] = [];
+

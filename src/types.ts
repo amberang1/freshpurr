@@ -1,3 +1,5 @@
+export type PollenLevel = 'Low' | 'Moderate' | 'High' | 'Unavailable';
+
 export type Severity = 'Mild' | 'Moderate' | 'Severe';
 
 export interface SymptomLog {
@@ -28,6 +30,8 @@ export interface TreatmentHistory {
   medicationId: string;
   timestamp: Date;
   status: 'Taken' | 'Missed';
+  scheduledFor?: string;
+  medicationName?: string;
 }
 
 export interface CatProfile {
@@ -44,13 +48,11 @@ export interface CatProfile {
 }
 
 export interface EnvironmentalData {
-  aqi: number;
-  humidity: number;
-  pollen: {
-    tree: 'Low' | 'Moderate' | 'High';
-    grass: 'Low' | 'Moderate' | 'High';
-    weed: 'Low' | 'Moderate' | 'High';
-  };
-  riskLevel: 'Low' | 'Medium' | 'High';
+  aqi: number | null;
+  humidity: number | null;
+  pollen: { tree: PollenLevel; grass: PollenLevel; weed: PollenLevel };
+  riskLevel: 'Low' | 'Medium' | 'High' | 'Unavailable';
   prediction: string;
+  indexLabel?: string;
+  observedAt?: string;
 }
