@@ -1,0 +1,7 @@
+{
+  "name": "breeze",
+  "description": "A calming, comprehensive companion for managing feline asthma through symptom tracking, medication reminders, and environmental trigger analysis.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
